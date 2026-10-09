@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>本部統括ダッシュボード - Logistics TMS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="bg-gray-100">
+    <nav id="main-nav" class="sticky top-0 z-[1100] bg-white shadow-md px-4 py-2 flex items-center justify-between flex-wrap gap-2"></nav>
+
+    <main class="p-4 max-w-7xl mx-auto space-y-4">
+        <h1 class="text-xl font-bold text-gray-800">🌐 本部統括ダッシュボード（全社監視）</h1>
+
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div class="kpi-card">
+                <div class="kpi-value" id="kpi-total">-</div>
+                <div class="kpi-label">総件数</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value text-green-600" id="kpi-completed">-</div>
+                <div class="kpi-label">配達完了</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value text-blue-600" id="kpi-rate">-</div>
+                <div class="kpi-label">完了率</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value text-indigo-600" id="kpi-active">-</div>
+                <div class="kpi-label">配達中</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value text-amber-600" id="kpi-unassigned">-</div>
+                <div class="kpi-label">未割当</div>
+            </div>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-4">
+            <div class="card">
+                <h2 class="font-bold text-gray-700 mb-3">🚗 車両別稼働率</h2>
+                <div id="vehicle-util" class="space-y-3"></div>
+            </div>
+            <div class="card">
+                <h2 class="font-bold text-gray-700 mb-3">🏬 拠点別実績</h2>
+                <div id="branch-stats" class="space-y-3"></div>
+            </div>
+        </div>
+
+        <div class="card relative z-0">
+            <h2 class="font-bold text-gray-700 mb-3">🗺️ 全拠点マップ</h2>
+            <div id="map"></div>
+        </div>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/js/common.js?v=4"></script>
+    <script>
+        async function loadStats() {
+            const stats = await TMS.api("/api/admin/stats");
+            document.getElementById("kpi-total").textContent = stats.total_shipments;
+            document.getElementById("kpi-completed").textContent = stats.completed_shipments;
+            document.getElementById("kpi-rate").textContent = stats.completion_rate + "%";
+            document.getElementById("kpi-active").textContent = stats.active_shipments;
+            document.getElementById("kpi-unassigned").textContent = stats.unassigned_shipments;
+
+            const vehicleNames = { moped: "原付", motorcycle: "バイク", van: "軽バン" };
+            document.getElementById("vehicle-util").innerHTML = stats.vehicle_utilization
+                .map(
+                    (v) => `
+                <div>
+                    <div class="flex justify-between text-sm mb-1">
+                        <span class="font-medium">${vehicleNames[v.vehicle_type] || v.vehicle_type}</span>
+                        <span class="text-gray-500">${v.busy}/${v.total} 稼働中 (${v.utilization_rate}%)</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width:${v.utilization_rate}%;background:#2563eb;"></div>
+                    </div>
+                </div>`
+                )
+                .join("");
+
+            document.getElementById("branch-stats").innerHTML = stats.branches
+                .map(
+                    (b) => `
+                <div>
+                    <div class="flex justify-between text-sm mb-1">
+                        <span class="font-medium">${b.name}</span>
+                        <span class="text-gray-500">${b.completed}/${b.total} 完了 (${b.completion_rate}%)</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width:${b.completion_rate}%;background:#059669;"></div>
+                    </div>
+                </div>`
+                )
+                .join("");
+        }
+
+        async function loadMap() {
+            const tokyo = TMS.getBranch(1) || TMS.branches[0];
+            const osaka = TMS.getBranch(2) || TMS.branches[1];
+            TMS.initMap("map", 35.1, 138.5, 6);
+            if (tokyo) TMS.addBranchMarker(tokyo);
+            if (osaka) TMS.addBranchMarker(osaka);
+
+            for (const branch of TMS.branches) {
+                const shipments = await TMS.api(`/api/shipments?branch_id=${branch.id}`);
+                shipments.forEach((s) => TMS.addShipmentMarker(s));
+            }
+            TMS.fitMarkers();
+        }
+
+        async function onBranchChange() {
+            await loadMap();
+        }
+
+        async function onDemoReset() {
+            await loadStats();
+            await loadMap();
+        }
+
+        (async function init() {
+            await TMS.loadBranches();
+            TMS.renderNav("admin");
+            await loadStats();
+            await loadMap();
+        })();
+    </script>
+</body>
+</html>

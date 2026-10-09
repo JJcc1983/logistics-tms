@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ドライバー配送端末 - Logistics TMS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="bg-gray-100">
+    <nav id="main-nav" class="sticky top-0 z-[1100] bg-white shadow-md px-4 py-2 flex items-center justify-between flex-wrap gap-2"></nav>
+
+    <main class="p-4 max-w-7xl mx-auto space-y-4">
+        <h1 class="text-xl font-bold text-gray-800">🛵 ドライバー配送端末</h1>
+
+        <div class="card">
+            <h2 class="font-bold text-gray-700 mb-3">🚗 車両選択</h2>
+            <div id="vehicle-tabs" class="flex gap-2 flex-wrap"></div>
+        </div>
+
+        <div class="card">
+            <h2 class="font-bold text-gray-700 mb-3">📊 リアルタイム積載メーター</h2>
+            <div id="driver-info" class="text-sm text-gray-600 mb-3"></div>
+            <div class="grid md:grid-cols-2 gap-4">
+                <div>
+                    <div class="flex justify-between text-sm mb-1">
+                        <span class="font-medium">積載重量</span>
+                        <span id="weight-text">-</span>
+                    </div>
+                    <div class="progress-bar" style="height:1rem;">
+                        <div id="weight-bar" class="progress-fill" style="width:0%;background:#2563eb;"></div>
+                    </div>
+                </div>
+                <div>
+                    <div class="flex justify-between text-sm mb-1">
+                        <span class="font-medium">荷台容量</span>
+                        <span id="count-text">-</span>
+                    </div>
+                    <div class="progress-bar" style="height:1rem;">
+                        <div id="count-bar" class="progress-fill" style="width:0%;background:#059669;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card relative z-0">
+            <h2 class="font-bold text-gray-700 mb-3">🗺️ 配達マップ</h2>
+            <div id="map"></div>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-4">
+            <div class="card">
+                <h2 class="font-bold text-gray-700 mb-3">📋 オファープール（未割当案件）</h2>
+                <div class="overflow-x-auto">
+                    <table id="offer-pool">
+                        <thead>
+                            <tr>
+                                <th>伝票番号</th>
+                                <th>宛名</th>
+                                <th>品名</th>
+                                <th>サイズ</th>
+                                <th>重量</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2 class="font-bold text-gray-700 mb-3">📦 受託中荷物リスト</h2>
+                <div class="overflow-x-auto">
+                    <table id="active-list">
+                        <thead>
+                            <tr>
+                                <th>配送順</th>
+                                <th>伝票番号</th>
+                                <th>宛名</th>
+                                <th>品名</th>
+                                <th>サイズ</th>
+                                <th>重量</th>
+                                <th>ETA</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/js/common.js?v=4"></script>
+    <script>
+        let currentDriverId = null;
+        let currentDriver = null;
+
+        async function loadDrivers() {
+            const drivers = await TMS.api(`/api/drivers?branch_id=${TMS.currentBranchId}`);
+            const tabs = document.getElementById("vehicle-tabs");
+            tabs.innerHTML = drivers
+                .map(
+                    (d) => `
+                <button class="nav-tab ${d.id === currentDriverId ? "active" : ""}" data-driver-id="${d.id}">
+                    ${TMS.vehicleLabel(d.vehicle_type)} / ${d.name} (${TMS.employmentLabel(d.employment_type)})
+                </button>`
+                )
+                .join("");
+            tabs.querySelectorAll("button").forEach((btn) => {
+                btn.addEventListener("click", () => {
+                    currentDriverId = parseInt(btn.dataset.driverId, 10);
+                    refresh();
+                });
+            });
+            if (!currentDriverId && drivers.length > 0) {
+                currentDriverId = drivers[0].id;
+            }
+            return drivers;
+        }
+
+        function renderMeter(driver) {
+            const weightPct = Math.min(100, (driver.active_weight / driver.max_weight) * 100);
+            const slotPct = Math.min(100, (driver.used_slots / driver.capacity_slots) * 100);
+            document.getElementById("driver-info").textContent =
+                `${driver.name} / ${TMS.vehicleLabel(driver.vehicle_type)} / 許容サイズ: ${driver.allowed_sizes.join(", ")} / ステータス: ${driver.status}`;
+            document.getElementById("weight-text").textContent = `${driver.active_weight}kg / ${driver.max_weight}kg`;
+            document.getElementById("count-text").textContent = `${driver.used_slots} / ${driver.capacity_slots}スロット（${driver.active_count}件）`;
+            document.getElementById("weight-bar").style.width = weightPct + "%";
+            document.getElementById("weight-bar").style.background = weightPct > 90 ? "#dc2626" : "#2563eb";
+            document.getElementById("count-bar").style.width = slotPct + "%";
+            document.getElementById("count-bar").style.background = slotPct > 90 ? "#dc2626" : "#059669";
+        }
+
+        const SIZE_SLOTS = { S: 1, M: 4, L: 12 };
+
+        function canAccept(driver, shipment) {
+            if (!driver.allowed_sizes.includes(shipment.size_class)) return { ok: false, reason: `積載オーバー: サイズ${shipment.size_class}は非対応` };
+            const needed = SIZE_SLOTS[shipment.size_class] || 1;
+            if (driver.used_slots + needed > driver.capacity_slots) return { ok: false, reason: "積載オーバー: 荷台容量超過" };
+            if (driver.active_weight + shipment.weight_kg > driver.max_weight) return { ok: false, reason: "積載オーバー: 最大積載重量超過" };
+            return { ok: true };
+        }
+
+        async function loadOfferPool() {
+            const created = await TMS.api(`/api/shipments?branch_id=${TMS.currentBranchId}&status=created`);
+            const inHub = await TMS.api(`/api/shipments?branch_id=${TMS.currentBranchId}&status=in_hub`);
+            const offers = [...created, ...inHub];
+            const tbody = document.querySelector("#offer-pool tbody");
+            tbody.innerHTML = offers
+                .map((s) => {
+                    const check = currentDriver ? canAccept(currentDriver, s) : { ok: false, reason: "ドライバー未選択" };
+                    return `
+                <tr>
+                    <td class="font-mono">${s.tracking_number}</td>
+                    <td>${s.recipient_name}</td>
+                    <td>${s.cargo_type}</td>
+                    <td>${s.size_class}</td>
+                    <td>${s.weight_kg}kg</td>
+                    <td>
+                        <button class="btn-primary" data-shipment-id="${s.id}" ${check.ok ? "" : "disabled"}>
+                            ${check.ok ? "受託" : check.reason}
+                        </button>
+                    </td>
+                </tr>`;
+                })
+                .join("");
+            tbody.querySelectorAll("button[data-shipment-id]").forEach((btn) => {
+                btn.addEventListener("click", () => assignShipment(parseInt(btn.dataset.shipmentId, 10)));
+            });
+        }
+
+        async function loadActiveList() {
+            if (!currentDriverId) return;
+            const all = await TMS.api(`/api/shipments?branch_id=${TMS.currentBranchId}&status=delivering&driver_id=${currentDriverId}`);
+            const active = all.filter((s) => s.driver_id === currentDriverId);
+            active.sort((a, b) => (a.stop_order || 999) - (b.stop_order || 999));
+            const tbody = document.querySelector("#active-list tbody");
+            tbody.innerHTML = active
+                .map(
+                    (s) => {
+                        const circled = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"];
+                        const orderLabel = s.stop_order ? circled[s.stop_order - 1] || String(s.stop_order) : "-";
+                        const etaBadge = s.eta_minutes != null
+                            ? `<span class="status-badge status-delivering">あと${s.eta_minutes}分（${s.estimated_arrival_time || ""}）</span>`
+                            : "";
+                        return `
+                <tr>
+                    <td>${orderLabel}</td>
+                    <td class="font-mono">${s.tracking_number}</td>
+                    <td>${s.recipient_name}</td>
+                    <td>${s.cargo_type}</td>
+                    <td>${s.size_class}</td>
+                    <td>${s.weight_kg}kg</td>
+                    <td>${etaBadge}</td>
+                    <td><button class="btn-success" data-shipment-id="${s.id}">配達完了</button></td>
+                </tr>`;
+                    }
+                )
+                .join("");
+            tbody.querySelectorAll("button[data-shipment-id]").forEach((btn) => {
+                btn.addEventListener("click", () => completeShipment(parseInt(btn.dataset.shipmentId, 10)));
+            });
+        }
+
+        async function loadMap() {
+            const branch = TMS.getBranch(TMS.currentBranchId);
+            if (!branch) return;
+            TMS.initMap("map", branch.lat, branch.lng, 13);
+            TMS.addBranchMarker(branch);
+
+            const drivers = await TMS.api(`/api/drivers?branch_id=${branch.id}`);
+            const me = drivers.find((d) => d.id === currentDriverId);
+            if (me) {
+                const routeColor = me.route_color || "#3b82f6";
+                TMS.addDriverMarkerWithColor(me, routeColor);
+
+                const all = await TMS.api(`/api/shipments?branch_id=${branch.id}&status=delivering&driver_id=${currentDriverId}`);
+                const active = all.filter((s) => s.driver_id === currentDriverId);
+                active.sort((a, b) => (a.stop_order || 999) - (b.stop_order || 999));
+
+                const isMoped = me.vehicle_type === "moped";
+                let prevLat = me.current_lat;
+                let prevLng = me.current_lng;
+                for (const s of active) {
+                    TMS.addNumberedShipmentMarker(s, s.stop_order);
+                    await TMS.drawRoute(prevLat, prevLng, s.delivery_lat, s.delivery_lng, routeColor, isMoped);
+                    prevLat = s.delivery_lat;
+                    prevLng = s.delivery_lng;
+                }
+            } else {
+                const shipments = await TMS.api(`/api/shipments?branch_id=${branch.id}`);
+                shipments.forEach((s) => TMS.addShipmentMarker(s));
+                drivers.forEach((d) => TMS.addDriverMarker(d));
+            }
+
+            TMS.fitMarkers();
+        }
+
+        async function assignShipment(shipmentId) {
+            try {
+                await TMS.api(`/api/shipments/${shipmentId}/assign`, {
+                    method: "POST",
+                    body: JSON.stringify({ driver_id: currentDriverId }),
+                });
+                TMS.showToast("案件を受託しました");
+                await refresh();
+            } catch (e) {
+                TMS.showToast(e.message, true);
+            }
+        }
+
+        async function completeShipment(shipmentId) {
+            try {
+                await TMS.api(`/api/shipments/${shipmentId}/complete`, { method: "POST" });
+                TMS.showToast("配達完了にしました");
+                await refresh();
+            } catch (e) {
+                TMS.showToast(e.message, true);
+            }
+        }
+
+        async function onBranchChange() {
+            currentDriverId = null;
+            await refresh();
+        }
+
+        async function onDemoReset() {
+            currentDriverId = null;
+            await refresh();
+        }
+
+        async function refresh() {
+            const drivers = await loadDrivers();
+            currentDriver = drivers.find((d) => d.id === currentDriverId) || null;
+            if (currentDriver) renderMeter(currentDriver);
+            await loadOfferPool();
+            await loadActiveList();
+            await loadMap();
+        }
+
+        (async function init() {
+            await TMS.loadBranches();
+            TMS.renderNav("driver");
+            await refresh();
+        })();
+    </script>
+</body>
+</html>

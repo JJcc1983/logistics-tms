@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "logistics-tms"
+version = "1.0.0"
+description = "マルチ拠点型 輸配送管理システム (Logistics TMS)"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sqlalchemy>=2.0.0",
+    "pydantic>=2.7.0",
+]
+
+[tool.setuptools]
+py-modules = ["database", "models", "schemas", "seed_data", "main"]
+
+[tool.setuptools.package-data]
+"*" = ["static/**/*"]

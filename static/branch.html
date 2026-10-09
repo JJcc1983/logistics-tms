@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>営業所管理画面 - Logistics TMS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="bg-gray-100">
+    <nav id="main-nav" class="sticky top-0 z-[1100] bg-white shadow-md px-4 py-2 flex items-center justify-between flex-wrap gap-2"></nav>
+
+    <main class="p-4 max-w-7xl mx-auto space-y-4">
+        <h1 class="text-xl font-bold text-gray-800">🏬 営業所管理画面（荷受・仕分け・配車管理）</h1>
+
+        <div class="card relative z-0">
+            <h2 class="font-bold text-gray-700 mb-3">🗺️ 管内マップ</h2>
+            <div id="map"></div>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-4">
+            <div class="card">
+                <h2 class="font-bold text-gray-700 mb-3">📥 本日受入伝票一覧</h2>
+                <div class="overflow-x-auto">
+                    <table id="today-shipments">
+                        <thead>
+                            <tr>
+                                <th>伝票番号</th>
+                                <th>宛名</th>
+                                <th>品名</th>
+                                <th>サイズ</th>
+                                <th>重量</th>
+                                <th>ステータス</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2 class="font-bold text-gray-700 mb-3">⚠️ 管内未割当リスト</h2>
+                <div class="overflow-x-auto">
+                    <table id="unassigned-shipments">
+                        <thead>
+                            <tr>
+                                <th>伝票番号</th>
+                                <th>宛名</th>
+                                <th>品名</th>
+                                <th>サイズ</th>
+                                <th>重量</th>
+                                <th>状態</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="font-bold text-gray-700 mb-3">🚗 配車モニタリング</h2>
+            <div class="overflow-x-auto">
+                <table id="driver-monitor">
+                    <thead>
+                        <tr>
+                            <th>ドライバー</th>
+                            <th>雇用</th>
+                            <th>車両</th>
+                            <th>ステータス</th>
+                            <th>積載中</th>
+                            <th>重量</th>
+                            <th>上限</th></th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/js/common.js?v=4"></script>
+    <script>
+        async function loadTodayShipments() {
+            const shipments = await TMS.api(`/api/shipments?branch_id=${TMS.currentBranchId}`);
+            const tbody = document.querySelector("#today-shipments tbody");
+            tbody.innerHTML = shipments
+                .map(
+                    (s) => `
+                <tr>
+                    <td class="font-mono">${s.tracking_number}</td>
+                    <td>${s.recipient_name}</td>
+                    <td>${s.cargo_type}</td>
+                    <td>${s.size_class}</td>
+                    <td>${s.weight_kg}kg</td>
+                    <td><span class="status-badge status-${s.status}">${TMS.statusLabel(s.status)}</span></td>
+                </tr>`
+                )
+                .join("");
+        }
+
+        async function loadUnassigned() {
+            const created = await TMS.api(`/api/shipments?branch_id=${TMS.currentBranchId}&status=created`);
+            const inHub = await TMS.api(`/api/shipments?branch_id=${TMS.currentBranchId}&status=in_hub`);
+            const unassigned = [...created, ...inHub];
+            const tbody = document.querySelector("#unassigned-shipments tbody");
+            tbody.innerHTML = unassigned
+                .map(
+                    (s) => `
+                <tr>
+                    <td class="font-mono">${s.tracking_number}</td>
+                    <td>${s.recipient_name}</td>
+                    <td>${s.cargo_type}</td>
+                    <td>${s.size_class}</td>
+                    <td>${s.weight_kg}kg</td>
+                    <td><span class="status-badge status-${s.status}">${TMS.statusLabel(s.status)}</span></td>
+                </tr>`
+                )
+                .join("");
+        }
+
+        async function loadDriverMonitor() {
+            const drivers = await TMS.api(`/api/drivers?branch_id=${TMS.currentBranchId}`);
+            const tbody = document.querySelector("#driver-monitor tbody");
+            tbody.innerHTML = drivers
+                .map(
+                    (d) => `
+                <tr>
+                    <td>${d.name}</td>
+                    <td>${TMS.employmentLabel(d.employment_type)}</td>
+                    <td>${TMS.vehicleLabel(d.vehicle_type)}</td>
+                    <td>${d.status}</td>
+                    <td>${d.used_slots}/${d.capacity_slots}スロット（${d.active_count}件）</td>
+                    <td>${d.active_weight}/${d.max_weight}kg</td>
+                    <td>${d.allowed_sizes.join(", ")}</td>
+                </tr>`
+                )
+                .join("");
+        }
+
+        async function loadMap() {
+            const branch = TMS.getBranch(TMS.currentBranchId);
+            if (!branch) return;
+            TMS.initMap("map", branch.lat, branch.lng, 13);
+            TMS.addBranchMarker(branch);
+
+            const shipments = await TMS.api(`/api/shipments?branch_id=${branch.id}`);
+            shipments.forEach((s) => TMS.addShipmentMarker(s));
+
+            const drivers = await TMS.api(`/api/drivers?branch_id=${branch.id}`);
+            drivers.forEach((d) => TMS.addDriverMarker(d));
+
+            TMS.fitMarkers();
+        }
+
+        async function onBranchChange() {
+            await refresh();
+        }
+
+        async function onDemoReset() {
+            await refresh();
+        }
+
+        async function refresh() {
+            await loadTodayShipments();
+            await loadUnassigned();
+            await loadDriverMonitor();
+            await loadMap();
+        }
+
+        (async function init() {
+            await TMS.loadBranches();
+            TMS.renderNav("branch");
+            await refresh();
+        })();
+    </script>
+</body>
+</html>

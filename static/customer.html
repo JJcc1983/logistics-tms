@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>荷主発送依頼 & 追跡 - Logistics TMS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="bg-gray-100">
+    <nav id="main-nav" class="sticky top-0 z-[1100] bg-white shadow-md px-4 py-2 flex items-center justify-between flex-wrap gap-2"></nav>
+
+    <main class="p-4 max-w-7xl mx-auto space-y-4">
+        <h1 class="text-xl font-bold text-gray-800">📱 荷主発送依頼 & 伝票番号リアルタイム追跡</h1>
+
+        <div class="grid md:grid-cols-2 gap-4">
+            <div class="card">
+                <h2 class="font-bold text-gray-700 mb-3">📝 新規発送依頼フォーム</h2>
+                <form id="shipment-form" class="space-y-3">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-600 mb-1">荷主（発送元）</label>
+                        <select id="sender-select" required></select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-600 mb-1">お届け先宛名</label>
+                        <input type="text" id="recipient-name" required placeholder="例: 山田 太郎">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-600 mb-1">お届け先電話番号</label>
+                        <input type="tel" id="recipient-phone" required placeholder="例: 090-1234-5678">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-600 mb-1">お届け先住所</label>
+                        <input type="text" id="delivery-address" required placeholder="例: 東京都渋谷区神宮前1-1-1">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-600 mb-1">品名</label>
+                        <select id="cargo-type">
+                            <option value="契約書パック">契約書パック</option>
+                            <option value="精密機器">精密機器</option>
+                            <option value="飲料水2ケース">飲料水2ケース</option>
+                            <option value="衣類サンプル">衣類サンプル</option>
+                            <option value="食品サンプル">食品サンプル</option>
+                            <option value="書類">書類</option>
+                        </select>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-600 mb-1">サイズ</label>
+                            <select id="size-class">
+                                <option value="S">S</option>
+                                <option value="M">M</option>
+                                <option value="L">L</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-600 mb-1">重量 (kg)</label>
+                            <input type="number" id="weight-kg" step="0.1" min="0.1" value="1.0" required>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-600 mb-1">取扱注意</label>
+                        <select id="handling-flags">
+                            <option value="通常">通常</option>
+                            <option value="ワレモノ">ワレモノ</option>
+                            <option value="精密機器">精密機器</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-600 mb-1">運賃 (円)</label>
+                        <input type="number" id="shipping-fee" min="0" value="500" required>
+                    </div>
+                    <button type="submit" class="btn-primary w-full">発送依頼を作成</button>
+                </form>
+                <div id="create-result" class="mt-3 hidden"></div>
+            </div>
+
+            <div class="card">
+                <h2 class="font-bold text-gray-700 mb-3">🔍 リアルタイム追跡検索</h2>
+                <div class="flex gap-2 mb-3">
+                    <input type="text" id="tracking-input" placeholder="伝票番号を入力 (例: TK-20261007-001)" class="font-mono">
+                    <button id="track-btn" class="btn-primary whitespace-nowrap">検索</button>
+                </div>
+                <div id="track-result" class="hidden">
+                    <div class="mb-3">
+                        <div class="flex justify-between text-sm mb-1">
+                            <span class="font-medium">配送ステータス</span>
+                            <span id="track-status" class="font-bold"></span>
+                        </div>
+                        <div class="progress-bar" style="height:0.8rem;">
+                            <div id="track-progress" class="progress-fill" style="width:0%;background:#2563eb;"></div>
+                        </div>
+                    </div>
+                    <div id="eta-card" class="hidden mb-3 rounded-lg p-3 text-sm font-medium"></div>
+                    <table class="text-sm">
+                        <tbody id="track-details"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="card relative z-0">
+            <h2 class="font-bold text-gray-700 mb-3">🗺️ 追跡マップ</h2>
+            <div id="map"></div>
+        </div>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/js/common.js?v=4"></script>
+    <script>
+        const statusSteps = ["created", "in_hub", "delivering", "completed"];
+
+        async function loadSenders() {
+            const branch = TMS.getBranch(TMS.currentBranchId);
+            if (!branch) return;
+            const shipments = await TMS.api(`/api/shipments?branch_id=${branch.id}`);
+            const senderIds = [...new Set(shipments.map((s) => s.sender_customer_id))];
+            const select = document.getElementById("sender-select");
+            select.innerHTML = senderIds
+                .map((id) => {
+                    const s = shipments.find((x) => x.sender_customer_id === id);
+                    return `<option value="${id}">${s.sender_customer_id ? getCustomerName(id, shipments) : id}</option>`;
+                })
+                .join("");
+        }
+
+        function getCustomerName(customerId, shipments) {
+            const found = shipments.find((s) => s.sender_customer_id === customerId);
+            if (!found) return customerId;
+            const names = { 1: "山田 太郎", 2: "佐藤 商事", 3: "鈴木 花子", 4: "高橋 商店" };
+            return names[customerId] || `顧客${customerId}`;
+        }
+
+        async function loadMap() {
+            const branch = TMS.getBranch(TMS.currentBranchId);
+            if (!branch) return;
+            TMS.initMap("map", branch.lat, branch.lng, 13);
+            TMS.addBranchMarker(branch);
+
+            const shipments = await TMS.api(`/api/shipments?branch_id=${branch.id}`);
+            shipments.forEach((s) => TMS.addShipmentMarker(s));
+
+            TMS.fitMarkers();
+        }
+
+        document.getElementById("shipment-form").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const branch = TMS.getBranch(TMS.currentBranchId);
+            const senderId = parseInt(document.getElementById("sender-select").value, 10);
+            const sender = { 1: { lat: 35.6628, lng: 139.7317 }, 2: { lat: 35.6812, lng: 139.7671 }, 3: { lat: 34.6687, lng: 135.5013 }, 4: { lat: 34.6915, lng: 135.4950 } };
+            const coords = sender[senderId] || { lat: branch.lat, lng: branch.lng };
+
+            const payload = {
+                branch_id: branch.id,
+                sender_customer_id: senderId,
+                recipient_name: document.getElementById("recipient-name").value,
+                recipient_phone: document.getElementById("recipient-phone").value,
+                delivery_address: document.getElementById("delivery-address").value,
+                delivery_lat: coords.lat + (Math.random() - 0.5) * 0.02,
+                delivery_lng: coords.lng + (Math.random() - 0.5) * 0.02,
+                cargo_type: document.getElementById("cargo-type").value,
+                size_class: document.getElementById("size-class").value,
+                weight_kg: parseFloat(document.getElementById("weight-kg").value),
+                handling_flags: document.getElementById("handling-flags").value,
+                shipping_fee: parseInt(document.getElementById("shipping-fee").value, 10),
+            };
+
+            try {
+                const result = await TMS.api("/api/shipments", {
+                    method: "POST",
+                    body: JSON.stringify(payload),
+                });
+                const div = document.getElementById("create-result");
+                div.classList.remove("hidden");
+                div.innerHTML = `<div class="bg-green-50 border border-green-200 rounded-lg p-3 text-sm">
+                    <p class="font-bold text-green-700">✅ 発送依頼を作成しました</p>
+                    <p class="font-mono text-green-600 mt-1">伝票番号: ${result.tracking_number}</p>
+                    <p class="text-gray-500 mt-1">この番号で追跡できます</p>
+                </div>`;
+                document.getElementById("shipment-form").reset();
+                document.getElementById("weight-kg").value = "1.0";
+                document.getElementById("shipping-fee").value = "500";
+                await loadMap();
+            } catch (err) {
+                TMS.showToast(err.message, true);
+            }
+        });
+
+        document.getElementById("track-btn").addEventListener("click", trackShipment);
+        document.getElementById("tracking-input").addEventListener("keydown", (e) => {
+            if (e.key === "Enter") trackShipment();
+        });
+
+        async function trackShipment() {
+            const tn = document.getElementById("tracking-input").value.trim();
+            if (!tn) return;
+            try {
+                const data = await TMS.api(`/api/shipments/track/${encodeURIComponent(tn)}`);
+                const div = document.getElementById("track-result");
+                div.classList.remove("hidden");
+
+                const stepIndex = statusSteps.indexOf(data.status);
+                const progress = ((stepIndex + 1) / statusSteps.length) * 100;
+                document.getElementById("track-status").innerHTML =
+                    `<span class="status-badge status-${data.status}">${TMS.statusLabel(data.status)}</span>`;
+                document.getElementById("track-progress").style.width = progress + "%";
+
+                const etaCard = document.getElementById("eta-card");
+                if (data.status === "delivering" && data.eta_minutes != null) {
+                    const vehicleNames = { moped: "🛵 原付直行便", motorcycle: "🏍️ バイク配送", van: "🚗 巡回配送" };
+                    const vLabel = vehicleNames[data.driver_vehicle] || "配送";
+                    const tourInfo = data.driver_vehicle === "van" && data.stop_order && data.total_stops
+                        ? `（${data.stop_order}番目のお届け先 / 全${data.total_stops}件）`
+                        : "";
+                    const bgColor = data.route_color || "#2563eb";
+                    etaCard.classList.remove("hidden");
+                    etaCard.style.background = bgColor + "18";
+                    etaCard.style.borderLeft = `4px solid ${bgColor}`;
+                    etaCard.innerHTML = `<span style="color:${bgColor};">${vLabel}${tourInfo}：あと約${data.eta_minutes}分（${data.estimated_arrival_time || ""}）に到着予定</span>`;
+                } else {
+                    etaCard.classList.add("hidden");
+                }
+
+                const vehicleNames = { moped: "原付", motorcycle: "バイク", van: "軽バン" };
+                document.getElementById("track-details").innerHTML = `
+                    <tr><td class="py-1 font-medium text-gray-500">伝票番号</td><td class="py-1 font-mono">${data.tracking_number}</td></tr>
+                    <tr><td class="py-1 font-medium text-gray-500">営業所</td><td class="py-1">${data.branch_name}</td></tr>
+                    <tr><td class="py-1 font-medium text-gray-500">宛名</td><td class="py-1">${data.recipient_name}</td></tr>
+                    <tr><td class="py-1 font-medium text-gray-500">お届け先</td><td class="py-1">${data.delivery_address}</td></tr>
+                    <tr><td class="py-1 font-medium text-gray-500">品名</td><td class="py-1">${data.cargo_type}</td></tr>
+                    <tr><td class="py-1 font-medium text-gray-500">サイズ/重量</td><td class="py-1">${data.size_class} / ${data.weight_kg}kg</td></tr>
+                    <tr><td class="py-1 font-medium text-gray-500">配達員</td><td class="py-1">${data.driver_name || "未割当"}${data.driver_vehicle ? ` (${vehicleNames[data.driver_vehicle] || data.driver_vehicle})` : ""}</td></tr>
+                    <tr><td class="py-1 font-medium text-gray-500">受付日時</td><td class="py-1">${TMS.formatDate(data.created_at)}</td></tr>
+                `;
+
+                TMS.clearMarkers();
+                const branch = TMS.getBranch(TMS.currentBranchId);
+                if (branch) TMS.addBranchMarker(branch);
+
+                const destIcon = L.divIcon({
+                    className: "",
+                    html: `<div style="background:#dc2626;color:#fff;width:32px;height:32px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);"><span style="transform:rotate(45deg);font-size:14px;">📍</span></div>`,
+                    iconSize: [32, 32],
+                    iconAnchor: [16, 32],
+                });
+                const destMarker = L.marker([data.delivery_lat, data.delivery_lng], { icon: destIcon })
+                    .addTo(TMS.map)
+                    .bindPopup(`<b>${data.tracking_number}</b><br>${data.recipient_name}<br>${TMS.statusLabel(data.status)}`);
+                TMS.markers.push(destMarker);
+
+                if (data.status === "delivering" && data.driver_lat != null && data.driver_lng != null) {
+                    const routeColor = data.route_color || "#3b82f6";
+                    const isMoped = data.driver_vehicle === "moped";
+                    const driverIcons = { moped: "🛵", motorcycle: "🏍️", van: "🚐" };
+                    const dIcon = L.divIcon({
+                        className: "",
+                        html: `<div style="background:#fff;border:3px solid ${routeColor};border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 1px 4px rgba(0,0,0,0.4);">${driverIcons[data.driver_vehicle] || "🚗"}</div>`,
+                        iconSize: [32, 32],
+                        iconAnchor: [16, 16],
+                    });
+                    const dMarker = L.marker([data.driver_lat, data.driver_lng], { icon: dIcon })
+                        .addTo(TMS.map)
+                        .bindPopup(`<b>${data.driver_name || "ドライバー"}</b><br>現在地`);
+                    TMS.markers.push(dMarker);
+
+                    await TMS.drawRoute(data.driver_lat, data.driver_lng, data.delivery_lat, data.delivery_lng, routeColor, isMoped);
+                }
+
+                TMS.map.setView([data.delivery_lat, data.delivery_lng], 14);
+            } catch (err) {
+                TMS.showToast(err.message, true);
+            }
+        }
+
+        async function onBranchChange() {
+            await loadSenders();
+            await loadMap();
+        }
+
+        async function onDemoReset() {
+            await loadSenders();
+            await loadMap();
+        }
+
+        (async function init() {
+            await TMS.loadBranches();
+            TMS.renderNav("customer");
+            await loadSenders();
+            await loadMap();
+        })();
+    </script>
+</body>
+</html>
