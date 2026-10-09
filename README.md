@@ -1,3 +1,7 @@
+公開URL
+
+[https://logistics-tms-pgcw.onrender.com](https://logistics-tms-pgcw.onrender.com)
+
 # Logistics TMS (Transport Management System)
 
 > マルチ拠点対応・容積×重量 二軸物理制約エンジン搭載 ラストワンマイル輸配送管理システム
